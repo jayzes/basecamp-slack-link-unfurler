@@ -1,66 +1,73 @@
-require 'json'
-require 'net/http'
-require 'uri'
+require 'aws-sdk-lambda'
+require 'slack-ruby-client'
+require 'dotenv'
+require 'basecamp3'
+
+Dotenv.load
+
+lambda = Aws::Lambda::Client.new(region: ENV['AWS_REGION'])
+
+Slack.configure do |config|
+  config.token = ENV['SLACK_ACCESS_TOKEN']
+end
+
+client = Slack::Web::Client.new
+
+Basecamp3.configure do |config|
+  config.client_id     = ENV['BASECAMP_CLIENT_ID']
+  config.client_secret = ENV['BASECAMP_CLIENT_SECRET']
+end
 
 def handler(event:, context:)
-  # Check if the event is a "link_shared" event
-  return unless event['type'] == 'link_shared'
+  payload = JSON.parse(event['body'])
 
-  event['links'].each do |link|
-    # Check if the link is a Basecamp link
-    next unless link['url'].start_with?('https://3.basecamp.com')
+  if payload['event']['type'] == 'link_shared' && payload['event']['links'][0]['url'].match(/basecamp\.com\/\d+\//)
+    channel_id = payload['event']['channel']
+    ts = payload['event']['message_ts']
+    basecamp_url = payload['event']['links'][0]['url']
+    basecamp_project_id = basecamp_url.match(/basecamp\.com\/(\d+)\//)[1]
+    basecamp_todo_id = basecamp_url.match(/todos\/(\d+)/)[1]
+    basecamp = Basecamp3::Client.new(access_token: ENV['BASECAMP_ACCESS_TOKEN'])
+    todo = basecamp.todos.find(basecamp_todo_id, project_id: basecamp_project_id)
+    creator_name = todo.creator.name
+    assignees_names = todo.assignees.map(&:name).join(", ")
+    due_date = Date.parse(todo.due_on).strftime("%B %d, %Y")
 
-    # Extract the project ID and card ID from the link URL
-    _, project_id, _, card_id = link['url'].split('/')
-
-    # Call the Basecamp 3 API to get information about the card table
-    uri = URI.parse("https://3.basecampapi.com/#{project_id}/buckets/#{card_id}/cards/#{card_id}.json")
-    request = Net::HTTP::Get.new(uri)
-    request.basic_auth(ENV['BASECAMP_CLIENT_ID'], ENV['BASECAMP_CLIENT_SECRET'])
-    request['User-Agent'] = 'MyLambdaFunction'
-
-    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
-      http.request(request)
-    end
-
-    # Parse the response from the Basecamp 3 API
-    card = JSON.parse(response.body)
-
-    # Call the chat.unfurl API to augment the corresponding message with a card preview
-    uri = URI.parse('https://slack.com/api/chat.unfurl')
-    request = Net::HTTP::Post.new(uri)
-    request.content_type = 'application/json'
-    request['Authorization'] = "Bearer #{ENV['SLACK_ACCESS_TOKEN']}"
-    request.body = {
-      channel: event['channel'],
-      ts: link['ts'],
-      unfurls: {
-        link['url'] => {
-          title: card['name'],
-          text: card['description'],
-          color: '#36a64f', # green
-          fields: [
-            {
-              title: 'Table',
-              value: card['bucket']['name'],
-              short: true
-            },
-            {
-              title: 'Column',
-              value: card['column_name'],
-              short: true
-            }
-          ],
-          unfurl_media: true
+    attachment = {
+      title: todo.content,
+      title_link: basecamp_url,
+      color: '#00bcd4',
+      author_name: creator_name,
+      fields: [
+        {
+          title: "Assignees",
+          value: assignees_names,
+          short: true
+        },
+        {
+          title: "Due Date",
+          value: due_date,
+          short: true
         }
+      ]
+    }
+
+    client.chat_unfurl(
+      channel: channel_id,
+      ts: ts,
+      unfurls: {
+        basecamp_url => attachment
       }
-    }.to_json
+    )
 
-    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
-      http.request(request)
-    end
-
-    # Log the response from the chat.unfurl API
-    puts "Response from chat.unfurl API: #{response.body}"
+    {
+      statusCode: 200,
+      body: "Success"
+    }
+  else
+    {
+      statusCode: 200,
+      body: "Not a link to a Basecamp to-do"
+    }
   end
 end
