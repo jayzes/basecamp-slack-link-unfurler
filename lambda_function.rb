@@ -1,24 +1,26 @@
 require 'aws-sdk-lambda'
+require 'aws-sdk-ssm'
 require 'slack-ruby-client'
 require 'dotenv'
 require 'basecamp3'
 
 Dotenv.load
 
-lambda = Aws::Lambda::Client.new(region: ENV['AWS_REGION'])
+lambda_client = Aws::Lambda::Client.new(region: ENV['AWS_REGION'])
+ssm_client = Aws::SSM::Client.new(region: ENV['AWS_REGION'])
 
 Slack.configure do |config|
-  config.token = ENV['SLACK_ACCESS_TOKEN']
+  config.token = ssm_client.get_parameter(name: ENV['SLACK_ACCESS_TOKEN_PARAM_NAME'], with_decryption: true).parameter.value
 end
 
 client = Slack::Web::Client.new
 
 Basecamp3.configure do |config|
-  config.client_id     = ENV['BASECAMP_CLIENT_ID']
-  config.client_secret = ENV['BASECAMP_CLIENT_SECRET']
+  config.client_id = ssm_client.get_parameter(name: ENV['BASECAMP_CLIENT_ID_PARAM_NAME'], with_decryption: true).parameter.value
+  config.client_secret = ssm_client.get_parameter(name: ENV['BASECAMP_CLIENT_SECRET_PARAM_NAME'], with_decryption: true).parameter.value
 end
 
-def handler(event:, context:)
+def lambda_handler(event:, context:)
   payload = JSON.parse(event['body'])
 
   if payload['event']['type'] == 'link_shared' && payload['event']['links'][0]['url'].match(/basecamp\.com\/\d+\//)
@@ -27,7 +29,7 @@ def handler(event:, context:)
     basecamp_url = payload['event']['links'][0]['url']
     basecamp_project_id = basecamp_url.match(/basecamp\.com\/(\d+)\//)[1]
     basecamp_todo_id = basecamp_url.match(/todos\/(\d+)/)[1]
-    basecamp = Basecamp3::Client.new(access_token: ENV['BASECAMP_ACCESS_TOKEN'])
+    basecamp = Basecamp3::Client.new(access_token: ssm_client.get_parameter(name: ENV['BASECAMP_ACCESS_TOKEN_PARAM_NAME'], with_decryption: true).parameter.value)
     todo = basecamp.todos.find(basecamp_todo_id, project_id: basecamp_project_id)
     creator_name = todo.creator.name
     assignees_names = todo.assignees.map(&:name).join(", ")
